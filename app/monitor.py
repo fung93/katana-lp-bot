@@ -1,17 +1,18 @@
-"""Phase 3 monitoring loop: proactive border / IL alerts.
+"""Phase 3 monitoring: sustained out/in-range + campaign-expiry alerts.
 
-Runs as an asyncio task inside the bot process (no extra dependency). Every
-MONITOR_INTERVAL_SEC it reads the pool's live tick directly via RPC and checks
-each open position. Alerts fire on a SUSTAINED state change (default 5 min) so a
-price flickering across the border doesn't spam you:
+Two ways to run the same check:
+  * ``python -m app.monitor`` - one-shot pass for a scheduler (GitHub Actions
+    cron). Alert state lives in Neon (monitor_state) because a scheduled run has
+    no memory between invocations.
+  * in-process loop (opt-in) - if the bot runs always-on, set INPROCESS_MONITOR=1
+    and bot.py drives monitor_loop() every MONITOR_INTERVAL_SEC.
 
-  * out of range for >= sustain   -> "out of range" alert (with IL attached)
+Both call run_check(); both send via the Telegram HTTP API (no PTB needed for
+outbound), so the cron path stays a tiny, dependency-light script.
+
+Alert rule (sustained, so a flickering price doesn't spam you):
+  * out of range for >= sustain   -> "out of range" alert (IL attached)
   * back in range for >= sustain  -> "back in range" alert (only after an out)
-
-Plus a once-a-day Merkl campaign-expiry warning while you hold a position.
-
-Hysteresis state is in memory: a restart re-establishes the baseline, so at worst
-you get one repeat alert after a restart.
 """
 from __future__ import annotations
 
@@ -21,8 +22,16 @@ import os
 import time
 from datetime import datetime, timezone
 
+import httpx
+
 from .chain import get_slot0
-from .config import get_pool_address, get_rpc_url
+from .config import (
+    get_allowed_user_id,
+    get_pool_address,
+    get_rpc_url,
+    get_telegram_token,
+)
+from .db import get_cursor
 from .merkl import fetch_campaign
 from .positions import il_at_price, list_open
 from .tickmath import tick_to_price
@@ -34,19 +43,12 @@ RANGE_SUSTAIN_SEC = int(os.environ.get("RANGE_SUSTAIN_SEC", "300"))  # 5 minutes
 EXPIRY_THRESHOLD_DAYS = 7
 
 
+# --------------------------------------------------------------------------- #
+# Pure alert state machine (unit-tested in tests/test_monitor.py)
+# --------------------------------------------------------------------------- #
 def step(state: dict | None, in_range: bool, now: float,
          sustain: float) -> tuple[dict, str | None]:
-    """Advance one position's alert state.
-
-    Returns (new_state, alert) where alert is:
-      'out' - sustained out of range (always actionable),
-      'in'  - sustained recovery (only after a prior 'out'),
-      None  - nothing to send this tick.
-
-    A state change resets the timer; an alert fires once the same state has held
-    for `sustain` seconds. The 'in' alert is gated on a prior 'out' so a position
-    that was simply in range the whole time never produces a "back in range".
-    """
+    """Advance one position's alert state. Returns (new_state, 'out'|'in'|None)."""
     if state is None or state["in_range"] != in_range:
         prev_out = state["alerted_out"] if state else False
         return ({"in_range": in_range, "since": now, "alerted": False,
@@ -63,6 +65,9 @@ def step(state: dict | None, in_range: bool, now: float,
     return new, None  # initial in-range: nothing to recover from
 
 
+# --------------------------------------------------------------------------- #
+# Alert text
+# --------------------------------------------------------------------------- #
 def _out_alert(p, price: float) -> str:
     il_usd, il_pct = il_at_price(p, price)
     return (f"⚠️ Position #{p.id[:8]} OUT of range (>{RANGE_SUSTAIN_SEC // 60} min)\n"
@@ -75,61 +80,122 @@ def _in_alert(p, price: float) -> str:
             f"ETH ${price:,.2f}  ·  range ${p.price_low:,.0f}–${p.price_high:,.0f}")
 
 
-async def _tick(app, chat_id: int, state: dict, expiry_state: dict) -> None:
-    positions = await asyncio.to_thread(list_open)
+# --------------------------------------------------------------------------- #
+# Outbound via Telegram HTTP API (no PTB dependency in the cron path)
+# --------------------------------------------------------------------------- #
+def send_telegram(text: str) -> None:
+    resp = httpx.post(
+        f"https://api.telegram.org/bot{get_telegram_token()}/sendMessage",
+        json={"chat_id": get_allowed_user_id(), "text": text},
+        timeout=20,
+    )
+    resp.raise_for_status()
+
+
+# --------------------------------------------------------------------------- #
+# Alert state in Neon (a scheduled run has no memory between invocations)
+# --------------------------------------------------------------------------- #
+def load_states() -> dict:
+    with get_cursor(commit=False) as cur:
+        cur.execute("select position_id, in_range, since, alerted, alerted_out "
+                    "from monitor_state")
+        return {str(r[0]): {"in_range": r[1], "since": float(r[2]),
+                            "alerted": r[3], "alerted_out": r[4]}
+                for r in cur.fetchall()}
+
+
+def save_state(pos_id: str, st: dict) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            insert into monitor_state
+              (position_id, in_range, since, alerted, alerted_out, updated_at)
+            values (%s, %s, %s, %s, %s, now())
+            on conflict (position_id) do update set
+              in_range = excluded.in_range, since = excluded.since,
+              alerted = excluded.alerted, alerted_out = excluded.alerted_out,
+              updated_at = now()
+            """,
+            (pos_id, st["in_range"], st["since"], st["alerted"], st["alerted_out"]),
+        )
+
+
+def _meta_get(key: str) -> str | None:
+    with get_cursor(commit=False) as cur:
+        cur.execute("select value from monitor_meta where key = %s", (key,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def _meta_set(key: str, value: str) -> None:
+    with get_cursor() as cur:
+        cur.execute(
+            """insert into monitor_meta (key, value, updated_at) values (%s, %s, now())
+               on conflict (key) do update set value = excluded.value, updated_at = now()""",
+            (key, value),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# One monitoring pass (shared by the cron and the in-process loop)
+# --------------------------------------------------------------------------- #
+def run_check(send=send_telegram) -> int:
+    """Do one pass; send any alerts; return how many were sent."""
+    positions = list_open()
     if not positions:
-        state.clear()
-        return
-    slot0 = await asyncio.to_thread(get_slot0, get_rpc_url(), get_pool_address())
+        return 0
+    slot0 = get_slot0(get_rpc_url(), get_pool_address())
     price = tick_to_price(slot0.tick)
     now = time.time()
-
-    live = set()
+    states = load_states()
+    sent = 0
     for p in positions:
-        live.add(p.id)
-        new_state, alert = step(state.get(p.id), p.in_range(slot0.tick), now,
+        new_state, alert = step(states.get(p.id), p.in_range(slot0.tick), now,
                                 RANGE_SUSTAIN_SEC)
-        state[p.id] = new_state
+        save_state(p.id, new_state)
         if alert == "out":
-            await app.bot.send_message(chat_id, _out_alert(p, price))
-            log.info("OUT alert sent for %s", p.id[:8])
+            send(_out_alert(p, price)); sent += 1
+            log.info("OUT alert for %s", p.id[:8])
         elif alert == "in":
-            await app.bot.send_message(chat_id, _in_alert(p, price))
-            log.info("IN alert sent for %s", p.id[:8])
-    for pid in list(state):
-        if pid not in live:
-            del state[pid]
-
-    await _maybe_expiry_alert(app, chat_id, expiry_state)
+            send(_in_alert(p, price)); sent += 1
+            log.info("IN alert for %s", p.id[:8])
+    sent += _maybe_expiry(send)
+    return sent
 
 
-async def _maybe_expiry_alert(app, chat_id: int, expiry_state: dict) -> None:
+def _maybe_expiry(send) -> int:
     today = datetime.now(timezone.utc).date().isoformat()
-    if expiry_state.get("date") == today:
-        return
-    expiry_state["date"] = today
+    if _meta_get("last_expiry_date") == today:
+        return 0
+    _meta_set("last_expiry_date", today)
     try:
-        camp = await asyncio.to_thread(fetch_campaign)
+        camp = fetch_campaign()
     except Exception:
-        return
+        return 0
     if camp.is_expiring(EXPIRY_THRESHOLD_DAYS):
         end = datetime.fromtimestamp(camp.end_ts, tz=timezone.utc).strftime(
             "%Y-%m-%d %H:%M UTC")
-        await app.bot.send_message(
-            chat_id,
-            f"⏳ Merkl campaign ends in {camp.days_to_end():.1f} days ({end}).\n"
-            f"Incentive APR {camp.apr_pct:.1f}% drops to ~0 when it lapses.")
+        send(f"⏳ Merkl campaign ends in {camp.days_to_end():.1f} days ({end}).\n"
+             f"Incentive APR {camp.apr_pct:.1f}% drops to ~0 when it lapses.")
+        return 1
+    return 0
 
 
-async def monitor_loop(app) -> None:
-    chat_id = app.bot_data["allowed_user_id"]
-    state: dict = {}
-    expiry_state: dict = {}
-    log.info("monitor loop started (interval %ss, sustain %ss)",
+# --------------------------------------------------------------------------- #
+# In-process loop (opt-in: bot.py starts this only when INPROCESS_MONITOR=1)
+# --------------------------------------------------------------------------- #
+async def monitor_loop() -> None:
+    log.info("in-process monitor loop started (interval %ss, sustain %ss)",
              MONITOR_INTERVAL_SEC, RANGE_SUSTAIN_SEC)
     while True:
         try:
-            await _tick(app, chat_id, state, expiry_state)
+            await asyncio.to_thread(run_check)
         except Exception as exc:  # a bad tick must never kill the loop
             log.warning("monitor tick failed: %s", exc)
         await asyncio.sleep(MONITOR_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    count = run_check()
+    print(f"monitor: {count} alert(s) sent")

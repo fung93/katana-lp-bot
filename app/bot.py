@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import os
 from datetime import datetime, timezone
 
 from telegram import Update
@@ -383,10 +384,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _post_init(application: Application) -> None:
-    # asyncio.create_task (not Application.create_task) so PTB doesn't warn about
-    # un-awaited tasks; keep a reference so the loop isn't garbage-collected.
-    application.bot_data["_monitor_task"] = asyncio.create_task(monitor_loop(application))
-    log.info("monitor task scheduled")
+    # Alerts run via GitHub Actions cron (python -m app.monitor). Start an
+    # in-process loop only when explicitly asked (e.g. an always-on single host).
+    if os.environ.get("INPROCESS_MONITOR") == "1":
+        application.bot_data["_monitor_task"] = asyncio.create_task(monitor_loop())
+        log.info("in-process monitor enabled")
+    else:
+        log.info("in-process monitor off (alerts run via GitHub Actions cron)")
 
 
 def build_application() -> Application:

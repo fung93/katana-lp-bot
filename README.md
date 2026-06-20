@@ -27,8 +27,9 @@ app/
   bot.py          Telegram bot (/ping /price /pool /positions /status /open /close)  ->  python -m app.bot
   check_slot0.py  one-shot live ETH price print  ->  python -m app.check_slot0
 migrations/
-  0001_init.sql         positions + position_events (bounds are INTEGER TICKS)
-  0002_kat_at_open.sql  per-position KAT snapshot column
+  0001_init.sql           positions + position_events (bounds are INTEGER TICKS)
+  0002_kat_at_open.sql    per-position KAT snapshot column
+  0003_monitor_state.sql  alert hysteresis state for the scheduled monitor
 tests/
   test_tickmath.py   round-trip price->tick->price
   test_merkl.py      campaign parsing + expiry logic (offline)
@@ -69,9 +70,23 @@ python -m app.bot               # start the Telegram bot (needs token + user id)
 - `/close` — auto exit price + V3 exit composition + entry→exit value change + per-position KAT
 - `/cancel` — abort an `/open` in progress
 
-A background **monitor** (every 60s, direct RPC) alerts on a **sustained** out-of-range
-(≥5 min, with IL attached) and back-in-range change, plus a once-daily Merkl
-campaign-expiry warning. Tunable via `MONITOR_INTERVAL_SEC` / `RANGE_SUSTAIN_SEC`.
+A **monitor** check (`python -m app.monitor`) alerts on a **sustained** out-of-range
+(≥5 min, with IL attached) and back-in-range change, plus a once-daily campaign-expiry
+warning. In production it runs as a scheduled job (see Deploy); run it in-process instead
+with `INPROCESS_MONITOR=1`. Tunable via `MONITOR_INTERVAL_SEC` / `RANGE_SUSTAIN_SEC`.
+
+## Deploy — alerts 24/7 via GitHub Actions (no server)
+
+The alerts are outbound-only, so they run as a scheduled job rather than an always-on host:
+
+- [`.github/workflows/monitor.yml`](.github/workflows/monitor.yml) runs `python -m app.monitor`
+  every 5 min — **free on a public repo** (private repos cap Actions minutes).
+- Add repo **secrets** (Settings → Secrets and variables → Actions): `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_ALLOWED_USER_ID`, `DATABASE_URL`, `RPC_URL`, `WALLET_ADDRESS`.
+- Alert hysteresis state lives in Neon (`monitor_state`), so it survives between runs.
+- Run the **commands** (`/open`, `/close`, `/status`, …) locally on demand: `python -m app.bot`.
+- Note: a 5-min cron keeps Neon fairly active; if you near Neon's free compute limit, lower
+  Neon's autosuspend (~1 min) or widen the cron interval.
 
 ## Phase 0 exit criteria
 
