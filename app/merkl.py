@@ -93,3 +93,30 @@ def fetch_campaign(
     if not payload:
         raise RuntimeError(f"Merkl returned no campaign for {campaign_id}")
     return parse_campaign(payload)
+
+
+def fetch_pool_kat(wallet: str, pool_address: str, chain_id: int = 747474,
+                   reward_symbol: str = "KAT", base: str = MERKL_API_BASE,
+                   timeout: float = 25.0) -> float:
+    """Cumulative reward-token (KAT) the wallet has earned from one pool.
+
+    Sums Merkl breakdown rows whose `reason` references the pool address, across
+    all reward roots. The same pool runs many campaign ids over time, so we match
+    on the pool address, not a single campaign id. Used as an open/close snapshot;
+    a position's KAT earned is the close-minus-open difference.
+    """
+    resp = httpx.get(f"{base}/v4/users/{wallet}/rewards",
+                     params={"chainId": chain_id}, timeout=timeout, follow_redirects=True)
+    resp.raise_for_status()
+    payload = resp.json()
+    needle = pool_address.lower()
+    total_raw = 0
+    for root in (payload if isinstance(payload, list) else [payload]):
+        for entry in root.get("rewards", []):
+            if (entry.get("token") or {}).get("symbol") != reward_symbol:
+                continue
+            for b in entry.get("breakdowns", []):
+                if needle in str(b.get("reason", "")).lower():
+                    total_raw += int(b.get("amount", 0))
+    return total_raw / 1e18
+

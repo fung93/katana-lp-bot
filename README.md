@@ -7,7 +7,7 @@ Signal-only LP position tracker for the Katana **vbUSDC/vbETH 0.05%** pool
 never executes trades, never moves funds, and never handles private keys.
 
 See [`lp_bot_build_plan.md`](lp_bot_build_plan.md) for the full roadmap and
-[`DECISIONS.md`](DECISIONS.md) for stack/hosting decisions. **This repo implements Phase 0 + Phase 1 (read-only monitoring).**
+[`DECISIONS.md`](DECISIONS.md) for stack/hosting decisions. **This repo implements Phases 0–2 (scaffold, read-only monitoring, position logging).**
 
 ## Layout
 
@@ -15,18 +15,24 @@ See [`lp_bot_build_plan.md`](lp_bot_build_plan.md) for the full roadmap and
 app/
   config.py       env loading (secrets from .env; never printed)
   tickmath.py     tick <-> USD-price conversion (the price boundary; full derivation inside)
+  liquidity.py    V3 composition math (exit ETH/USDC + entry->exit value change)
   chain.py        read-only JSON-RPC slot0() read (no web3.py)
-  merkl.py        read-only Merkl v4 campaign client (APR, daily KAT, end date)
+  merkl.py        read-only Merkl v4 client (campaign status + per-wallet pool KAT)
   rawlog.py       append-only JSONL log of fetches (data/, gitignored)
+  cmdargs.py      tiny parsers for command input
   db.py           psycopg v3 + Neon cold-start retry
+  positions.py    open/close/list positions + exit report (USD in, ticks stored)
   migrate.py      forward-only SQL migration runner  ->  python -m app.migrate
-  bot.py          Telegram bot (/ping /price /pool), single-user lock  ->  python -m app.bot
+  bot.py          Telegram bot (/ping /price /pool /positions /open /close)  ->  python -m app.bot
   check_slot0.py  one-shot live ETH price print  ->  python -m app.check_slot0
 migrations/
-  0001_init.sql   positions + position_events (bounds are INTEGER TICKS)
+  0001_init.sql         positions + position_events (bounds are INTEGER TICKS)
+  0002_kat_at_open.sql  per-position KAT snapshot column
 tests/
-  test_tickmath.py  round-trip price->tick->price
-  test_merkl.py     campaign parsing + expiry logic (offline)
+  test_tickmath.py   round-trip price->tick->price
+  test_merkl.py      campaign parsing + expiry logic (offline)
+  test_positions.py  USD<->tick bounds + arg parsing
+  test_liquidity.py  V3 composition (round-trip + edges)
 ```
 
 ## Setup
@@ -55,6 +61,10 @@ python -m app.bot               # start the Telegram bot (needs token + user id)
 - `/ping` — health check
 - `/price` — current ETH price from pool `slot0`
 - `/pool` — price + Merkl campaign status (incentive APR, daily KAT, end date; ⚠️ flagged if it ends within 7 days)
+- `/positions` — open positions with in/out-of-range status
+- `/open` — guided prompts (entry → lower → upper → capital → eth → usdc); USD in, ticks stored
+- `/close` — auto exit price + V3 exit composition + entry→exit value change + per-position KAT
+- `/cancel` — abort an `/open` in progress
 
 ## Phase 0 exit criteria
 
@@ -73,4 +83,11 @@ Live steps (migrate / slot0 / `/ping`) need the corresponding secret in `.env`.
 - [x] Merkl v4 client (`GET /v4/campaigns?campaignId=`); parsing + expiry logic tested offline
 - [x] raw fetch log (`data/raw_log.jsonl`); no position writes yet
 
-Not in scope until later: position logging (Phase 2), monitoring loop + alerts (Phase 3).
+Not in scope until later: monitoring loop + alerts (Phase 3).
+
+## Phase 2 exit criteria
+
+- [x] `/open` (guided), `/close`, `/positions` — full open→close lifecycle from Telegram
+- [x] writes to `positions` + `position_events` in Neon; bounds stored as ticks, USD at the boundary
+- [x] `/close` reports exit price, exit ETH/USDC, entry→exit value change, KAT earned
+- [x] per-position KAT via Merkl per-wallet pool attribution (snapshot at open, diff at close)

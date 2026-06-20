@@ -55,3 +55,9 @@ def get_allowed_user_id() -> int:
         raise ConfigError(
             "TELEGRAM_ALLOWED_USER_ID must be an integer (your numeric Telegram user ID)."
         ) from exc
+
+
+def get_wallet_address() -> str | None:
+    """Public LP wallet for Merkl KAT lookups. Optional - KAT tracking is off if unset."""
+    val = os.environ.get("WALLET_ADDRESS")
+    return val.strip() if val and val.strip() else None

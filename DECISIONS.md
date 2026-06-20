@@ -33,3 +33,20 @@ and in the cloud.
 - `lower_bound` / `upper_bound` are INTEGER TICKS (tickLower/tickUpper), not prices.
 - Added `pool_address` and `fee_tier` to `positions`.
 - Prices the human sees are always derived from ticks via `app/tickmath.py`.
+
+## D6 - Phase 2: position-logging UX + KAT attribution
+- `/open` is a guided conversation (one prompt per field); `/close` is one-tap. All
+  bounds are entered/shown in USD and stored as ticks (min/max guards the price->tick
+  inversion, since token0 is the stablecoin).
+- `/close` reports exit price (auto from `slot0`), V3 exit composition (ETH/USDC),
+  entry->exit value change, and per-position KAT. Fees and gas were dropped on request:
+  a signal-only bot with manually-logged positions cannot see on-chain fees or the gas
+  of a tx it never signs.
+- Liquidity is anchored on the declared capital (entry value == capital), which sidesteps
+  any inconsistency in the manually entered token split. See `app/liquidity.py`.
+- KAT attribution matches the POOL ADDRESS in the Merkl breakdown `reason`, NOT a single
+  campaign id — the same pool runs many campaign ids over time. Per-position KAT = the
+  wallet's pool-KAT snapshot at close minus at open (`kat_at_open`, migration 0002),
+  endpoint `GET /v4/users/{wallet}/rewards?chainId=747474`.
+- `WALLET_ADDRESS` (public, optional) in `.env` enables KAT tracking; absent it, `/close`
+  shows the other three items and notes KAT is off.
