@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Raw fetch log (runtime data)
+data/
+
 # Python
 __pycache__/
 *.py[cod]
