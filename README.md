@@ -7,7 +7,7 @@ Signal-only LP position tracker for the Katana **vbUSDC/vbETH 0.05%** pool
 never executes trades, never moves funds, and never handles private keys.
 
 See [`lp_bot_build_plan.md`](lp_bot_build_plan.md) for the full roadmap and
-[`DECISIONS.md`](DECISIONS.md) for stack/hosting decisions. **This repo implements Phases 0–2 (scaffold, read-only monitoring, position logging).**
+[`DECISIONS.md`](DECISIONS.md) for stack/hosting decisions. **This repo implements Phases 0–3 (scaffold, monitoring, position logging, border/IL alerts).**
 
 ## Layout
 
@@ -21,9 +21,10 @@ app/
   rawlog.py       append-only JSONL log of fetches (data/, gitignored)
   cmdargs.py      tiny parsers for command input
   db.py           psycopg v3 + Neon cold-start retry
-  positions.py    open/close/list positions + exit report (USD in, ticks stored)
+  positions.py    open/close/list positions + exit report + IL (USD in, ticks stored)
+  monitor.py      background loop: sustained out/in-range + campaign-expiry alerts
   migrate.py      forward-only SQL migration runner  ->  python -m app.migrate
-  bot.py          Telegram bot (/ping /price /pool /positions /open /close)  ->  python -m app.bot
+  bot.py          Telegram bot (/ping /price /pool /positions /status /open /close)  ->  python -m app.bot
   check_slot0.py  one-shot live ETH price print  ->  python -m app.check_slot0
 migrations/
   0001_init.sql         positions + position_events (bounds are INTEGER TICKS)
@@ -31,8 +32,9 @@ migrations/
 tests/
   test_tickmath.py   round-trip price->tick->price
   test_merkl.py      campaign parsing + expiry logic (offline)
-  test_positions.py  USD<->tick bounds + arg parsing
+  test_positions.py  USD<->tick bounds + arg parsing + IL
   test_liquidity.py  V3 composition (round-trip + edges)
+  test_monitor.py    sustained in/out-of-range alert state machine
 ```
 
 ## Setup
@@ -62,9 +64,14 @@ python -m app.bot               # start the Telegram bot (needs token + user id)
 - `/price` — current ETH price from pool `slot0`
 - `/pool` — price + Merkl campaign status (incentive APR, daily KAT, end date; ⚠️ flagged if it ends within 7 days)
 - `/positions` — open positions with in/out-of-range status
+- `/status` — on-demand per-position risk: in/out, distance to nearest border, IL
 - `/open` — guided prompts (entry → lower → upper → capital → eth → usdc); USD in, ticks stored
 - `/close` — auto exit price + V3 exit composition + entry→exit value change + per-position KAT
 - `/cancel` — abort an `/open` in progress
+
+A background **monitor** (every 60s, direct RPC) alerts on a **sustained** out-of-range
+(≥5 min, with IL attached) and back-in-range change, plus a once-daily Merkl
+campaign-expiry warning. Tunable via `MONITOR_INTERVAL_SEC` / `RANGE_SUSTAIN_SEC`.
 
 ## Phase 0 exit criteria
 
@@ -91,3 +98,13 @@ Not in scope until later: monitoring loop + alerts (Phase 3).
 - [x] writes to `positions` + `position_events` in Neon; bounds stored as ticks, USD at the boundary
 - [x] `/close` reports exit price, exit ETH/USDC, entry→exit value change, KAT earned
 - [x] per-position KAT via Merkl per-wallet pool attribution (snapshot at open, diff at close)
+
+## Phase 3 exit criteria
+
+- [x] background monitor loop (60s, direct RPC) inside the bot process — no extra deps
+- [x] **sustained** out-of-range (≥5 min) alert with IL attached; back-in-range recovery alert
+- [x] flicker below the sustain window stays silent (state machine unit-tested)
+- [x] `/status` on-demand risk readout; once-daily campaign-expiry warning
+- [x] proven end-to-end: a real out-of-range alert reached Telegram in the live test
+
+Not in scope until later: range suggester (Phase 4), analytics (Phase 5), hedge (Phase 6).

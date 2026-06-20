@@ -12,10 +12,14 @@ Commands:
     /price       current ETH price from pool slot0
     /pool        price + Merkl campaign status (APR, daily KAT, end date)
     /positions   list open positions with in/out-of-range status
+    /status      on-demand per-position risk: in/out, border distance, IL
     /open        guided: prompts entry -> lower -> upper -> capital -> eth -> usdc
     /close       auto exit price + V3 exit composition + value change;
                  /close <id> to pick when several are open
     /cancel      abort an /open in progress
+
+A background monitor (app.monitor) runs in the same process and alerts on a
+sustained out-of-range / back-in-range change (with IL) and campaign expiry.
 
     python -m app.bot
 """
@@ -46,10 +50,12 @@ from .config import (
     get_wallet_address,
 )
 from .merkl import fetch_campaign, fetch_pool_kat
+from .monitor import monitor_loop
 from .positions import (
     close_position,
     exit_report,
     find_open_by_prefix,
+    il_at_price,
     list_open,
     open_position,
 )
@@ -348,10 +354,45 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+@restricted
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        rows = await asyncio.to_thread(list_open)
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ DB error: {exc}")
+        return
+    if not rows:
+        await update.message.reply_text("No open positions.")
+        return
+    try:
+        tick, px = await _read_price()
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ RPC read failed: {exc}")
+        return
+    out = [f"\U0001f4e1 Status — ETH ${px:,.2f}"]
+    for p in rows:
+        flag = "✅ in range" if p.in_range(tick) else "⚠️ OUT of range"
+        il_usd, il_pct = il_at_price(p, px)
+        dist = min(abs(px - p.price_low), abs(p.price_high - px)) / px * 100
+        out.append(
+            f"\n#{p.id[:8]}  {flag}\n"
+            f"  range ${p.price_low:,.0f}–${p.price_high:,.0f}  (nearest border {dist:.1f}%)\n"
+            f"  IL: -${abs(il_usd):,.2f} ({il_pct:+.1%})"
+        )
+    await update.message.reply_text("\n".join(out))
+
+
+async def _post_init(application: Application) -> None:
+    # asyncio.create_task (not Application.create_task) so PTB doesn't warn about
+    # un-awaited tasks; keep a reference so the loop isn't garbage-collected.
+    application.bot_data["_monitor_task"] = asyncio.create_task(monitor_loop(application))
+    log.info("monitor task scheduled")
+
+
 def build_application() -> Application:
     token = get_telegram_token()
     allowed = get_allowed_user_id()
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(_post_init).build()
     app.bot_data["allowed_user_id"] = allowed
 
     only_me = filters.User(user_id=allowed)
@@ -361,6 +402,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("price", price, filters=only_me))
     app.add_handler(CommandHandler("pool", pool, filters=only_me))
     app.add_handler(CommandHandler("positions", positions_cmd, filters=only_me))
+    app.add_handler(CommandHandler("status", status, filters=only_me))
     app.add_handler(CommandHandler("close", close_cmd, filters=only_me))
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("open", open_start, filters=only_me)],

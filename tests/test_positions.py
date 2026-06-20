@@ -11,7 +11,7 @@ import datetime as dt
 import pytest
 
 from app.cmdargs import amount_or_skip, opt_amount, parse_kwargs, req_amount, to_amount
-from app.positions import Position, bounds_to_ticks
+from app.positions import Position, bounds_to_ticks, il_at_price
 from app.tickmath import price_to_tick
 
 
@@ -73,3 +73,12 @@ def test_to_amount_and_skip() -> None:
     assert amount_or_skip("500") == 500.0
     with pytest.raises(ValueError):
         to_amount("abc")
+
+
+def test_il_zero_at_entry_negative_away() -> None:
+    lt, ut = bounds_to_ticks(1600, 1800)
+    p = _pos(lt, ut)  # entry 1700, capital 5000
+    il0, _ = il_at_price(p, 1700.0)
+    assert abs(il0) < 1.0          # ~0 at entry (LP == HODL)
+    il1, pct1 = il_at_price(p, 1780.0)
+    assert il1 < 0 and pct1 < 0    # a move away is a loss vs HODL

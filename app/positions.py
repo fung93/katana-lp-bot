@@ -172,3 +172,17 @@ def exit_report(pos: Position, exit_price: float) -> ExitReport:
         entry_value=pos.capital_usd, exit_value=exit_value,
         delta=exit_value - pos.capital_usd,
     )
+
+
+def il_at_price(pos: Position, price: float) -> tuple[float, float]:
+    """Impermanent loss vs HODL at a price: (abs USD, fraction). 0 at entry, <= 0 away."""
+    if pos.capital_usd is None or pos.entry_price is None:
+        raise ValueError("position is missing capital or entry price")
+    liq = liquidity_for_capital(
+        pos.capital_usd, pos.entry_price, pos.lower_tick, pos.upper_tick
+    )
+    usdc_e, eth_e = composition(pos.entry_price, pos.lower_tick, pos.upper_tick, liq)
+    usdc_p, eth_p = composition(price, pos.lower_tick, pos.upper_tick, liq)
+    hodl = usdc_e + eth_e * price          # value if you'd just held the entry mix
+    lp = usdc_p + eth_p * price            # value of the LP position now
+    return lp - hodl, (lp / hodl - 1.0) if hodl else 0.0

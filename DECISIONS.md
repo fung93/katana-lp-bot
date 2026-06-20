@@ -50,3 +50,18 @@ and in the cloud.
   endpoint `GET /v4/users/{wallet}/rewards?chainId=747474`.
 - `WALLET_ADDRESS` (public, optional) in `.env` enables KAT tracking; absent it, `/close`
   shows the other three items and notes KAT is off.
+
+## D7 - Phase 3: monitoring loop + sustained alerts
+- The loop is an `asyncio` task inside the bot process (no APScheduler/cron), reading pool
+  `slot0` directly via RPC every 60s. Started in `Application` post_init via
+  `asyncio.create_task` with a retained reference (avoids PTB's `create_task` warning and
+  the task being garbage-collected).
+- Headline alert (user's spec): SUSTAINED out-of-range >= 5 min -> alert with IL attached;
+  SUSTAINED back-in-range -> alert, but only after a prior "out" (a position that was in
+  range the whole time never produces a "back in range"). A flicker below the sustain
+  window is silent. Logic is `app/monitor.py:step()`, unit-tested with simulated timestamps.
+- Hysteresis state is in memory; a restart re-baselines (at worst one repeat alert).
+- Plus `/status` (on-demand risk readout) and a once-daily campaign-expiry warning while a
+  position is open. Tunable via env `MONITOR_INTERVAL_SEC` (60) and `RANGE_SUSTAIN_SEC` (300).
+- IL is computed vs HODL from the same V3 composition math; net P&L is shown as KAT - IL
+  (fees/gas remain out of scope for a signal-only bot).
