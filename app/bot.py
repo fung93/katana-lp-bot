@@ -13,7 +13,7 @@ Commands:
     /pool        price + Merkl campaign status (APR, daily KAT, end date)
     /positions   list open positions with in/out-of-range status
     /status      on-demand per-position risk: in/out, border distance, IL
-    /open        guided: prompts entry -> lower -> upper -> capital -> eth -> usdc
+    /open        guided: prompts entry -> lower -> upper -> eth -> usdc
     /close       auto exit price + V3 exit composition + value change;
                  /close <id> to pick when several are open
     /cancel      abort an /open in progress
@@ -287,7 +287,6 @@ OPEN_FIELDS = [
     ("entry", "Entry price in USD? (e.g. 1700)"),
     ("lower", "Lower bound price in USD? (e.g. 1600)"),
     ("upper", "Upper bound price in USD? (e.g. 1800)"),
-    ("capital", "Capital in USD? (e.g. 5000)"),
     ("eth", "ETH amount? (e.g. 1.5)"),
     ("usdc", "USDC amount? (e.g. 2500)"),
 ]
@@ -320,6 +319,7 @@ async def open_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     v = st["vals"]
     context.user_data.pop("open", None)
+    capital = v["eth"] * v["entry"] + v["usdc"]   # entry value = the deposit in USD
     # Snapshot the wallet's cumulative pool KAT so /close can diff it later.
     kat_at_open = None
     wallet = get_wallet_address()
@@ -331,20 +331,20 @@ async def open_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         pos = await asyncio.to_thread(
             open_position, entry_price=v["entry"], lower_price=v["lower"],
-            upper_price=v["upper"], capital_usd=v["capital"],
+            upper_price=v["upper"], capital_usd=capital,
             amount_eth=v["eth"], amount_usdc=v["usdc"], kat_at_open=kat_at_open,
         )
     except Exception as exc:
         await update.message.reply_text(f"⚠️ DB error: {exc}")
         return ConversationHandler.END
     record("open", position_id=pos.id, entry=v["entry"], lower=v["lower"],
-           upper=v["upper"], capital=v["capital"])
+           upper=v["upper"], capital=capital)
     await update.message.reply_text(
         "✅ Position opened\n"
         f"id: {pos.id[:8]}\n"
         f"entry: ${v['entry']:,.2f}\n"
         f"range: ${pos.price_low:,.2f} – ${pos.price_high:,.2f}\n"
-        f"capital: ${v['capital']:,.2f}  ({v['eth']:g} ETH + {v['usdc']:g} USDC)"
+        f"value: ${capital:,.2f}  ({v['eth']:g} ETH + {v['usdc']:g} USDC)"
     )
     return ConversationHandler.END
 

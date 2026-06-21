@@ -66,7 +66,7 @@ python -m app.bot               # start the Telegram bot (needs token + user id)
 - `/pool` — price + Merkl campaign status (incentive APR, daily KAT, end date; ⚠️ flagged if it ends within 7 days)
 - `/positions` — open positions with in/out-of-range status
 - `/status` — on-demand per-position risk: in/out, distance to nearest border, IL
-- `/open` — guided prompts (entry → lower → upper → capital → eth → usdc); USD in, ticks stored
+- `/open` — guided prompts (entry → lower → upper → eth → usdc); value is computed as eth×entry + usdc; USD in, ticks stored
 - `/close` — auto exit price + V3 exit composition + entry→exit value change + per-position KAT
 - `/cancel` — abort an `/open` in progress
 
