@@ -414,18 +414,25 @@ async def suggest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"range: ${sug.lower_price:,.0f} – ${sug.upper_price:,.0f}  (±{sug.half_width_pct:.1f}%)",
         f"est. time-in-range: {sug.time_in_range:.0%}",
     ]
-    if capital:
-        try:
-            camp = await asyncio.to_thread(fetch_campaign)
-            tvl = await asyncio.to_thread(fetch_pool_tvl)
-            share = capital / (tvl + capital) if tvl > 0 else 0.0
-            exp_kat = share * camp.daily_reward * sug.time_in_range
-            lines.append(
-                f"est. daily KAT for ${capital:,.0f}: {exp_kat:,.0f} KAT "
-                f"(≈ ${exp_kat * camp.reward_price_usd:,.2f}/day)")
-            lines.append("  rough: capital/TVL share × pool KAT × time-in-range")
-        except Exception as exc:
-            lines.append(f"(KAT estimate unavailable: {exc})")
+    try:
+        camp = await asyncio.to_thread(fetch_campaign)
+        tvl = await asyncio.to_thread(fetch_pool_tvl)
+
+        def daily_kat(cap: float) -> float:
+            share = cap / (tvl + cap) if tvl > 0 else 0.0
+            return share * camp.daily_reward * sug.time_in_range
+
+        k1 = daily_kat(1000.0)
+        apr = (k1 * camp.reward_price_usd) / 1000.0 * 365
+        lines.append(f"est. KAT: {k1:,.0f}/day per $1,000 "
+                     f"(≈ ${k1 * camp.reward_price_usd:,.2f}) · ~{apr:.0%} APR")
+        if capital:
+            kc = daily_kat(capital)
+            lines.append(f"for ${capital:,.0f}: {kc:,.0f} KAT/day "
+                         f"(≈ ${kc * camp.reward_price_usd:,.2f})")
+        lines.append("  rough: capital/TVL share × pool KAT × time-in-range")
+    except Exception as exc:
+        lines.append(f"(KAT estimate unavailable: {exc})")
     await update.message.reply_text("\n".join(lines))
 
 
