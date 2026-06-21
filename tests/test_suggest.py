@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 from app.prices import hourly_vol
-from app.suggest import _sim_logprices, _time_in_range, suggest_range
+from app.suggest import (
+    _sim_logprices,
+    _time_in_range,
+    suggest_range,
+    time_in_range_for_bounds,
+)
 
 
 def test_hourly_vol_flat_and_known() -> None:
@@ -34,3 +39,11 @@ def test_lower_target_gives_narrower_range() -> None:
     loose = suggest_range(1700, 0.0066, days=7, target_tir=0.60, seed=5)
     tight = suggest_range(1700, 0.0066, days=7, target_tir=0.90, seed=5)
     assert tight.half_width_pct > loose.half_width_pct   # higher TIR needs wider band
+
+
+def test_time_in_range_for_bounds() -> None:
+    wide = time_in_range_for_bounds(1700, 1500, 1900, 0.0066, 7, seed=7)
+    narrow = time_in_range_for_bounds(1700, 1680, 1720, 0.0066, 7, seed=7)
+    assert 0.0 <= narrow < wide <= 1.0
+    off = time_in_range_for_bounds(1700, 2000, 2200, 0.0066, 7, seed=7)  # excludes price
+    assert off < 0.2

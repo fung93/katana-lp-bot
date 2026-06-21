@@ -63,3 +63,14 @@ def suggest_range(price: float, sigma_hourly: float, days: float, target_tir: fl
         half_width_pct=(math.exp(w) - 1) * 100,
         time_in_range=_time_in_range(vals, w),
     )
+
+
+def time_in_range_for_bounds(price: float, lower: float, upper: float,
+                             sigma_hourly: float, days: float,
+                             n_paths: int = 2000, seed: int = 42) -> float:
+    """Estimated time-in-range for an arbitrary (possibly asymmetric) range."""
+    horizon = max(1, int(round(days * 24)))
+    vals = _sim_logprices(sigma_hourly, horizon, n_paths, seed)
+    lo = bisect.bisect_left(vals, math.log(lower / price))
+    hi = bisect.bisect_right(vals, math.log(upper / price))
+    return (hi - lo) / len(vals)
