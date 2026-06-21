@@ -9,6 +9,7 @@ re-checks the id as defense in depth.
 
 Commands:
     /ping        health check
+    /help        list all commands (also /start)
     /price       current ETH price from pool slot0
     /pool        price + Merkl campaign status (APR, daily KAT, end date)
     /positions   list open positions with in/out-of-range status
@@ -34,7 +35,7 @@ import math
 import os
 from datetime import datetime, timezone
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -476,7 +477,44 @@ async def reward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+_HELP = (
+    "\U0001f916 Katana LP bot — commands\n\n"
+    "Read\n"
+    "/price — current ETH price (pool)\n"
+    "/pool — price + Merkl campaign (APR, daily KAT, end date)\n"
+    "/positions — open positions + in/out-of-range\n"
+    "/status — per-position risk: distance to border + IL\n\n"
+    "Plan\n"
+    "/suggest [days] [target%] [capital] — suggest a range + est. KAT\n"
+    "/reward <lower> <upper> [days] — est. daily KAT per $1,000 for a range\n\n"
+    "Manage\n"
+    "/open — log a position (guided: entry → lower → upper → eth → usdc)\n"
+    "/close — close it: exit price + composition + value change + KAT\n"
+    "/cancel — abort an /open in progress\n\n"
+    "/ping — health check  ·  /help — this list\n"
+    "Alerts (sustained out/in-range + IL, campaign expiry) run automatically."
+)
+
+
+@restricted
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(_HELP)
+
+
 async def _post_init(application: Application) -> None:
+    await application.bot.set_my_commands([
+        BotCommand("help", "list all commands"),
+        BotCommand("price", "current ETH price"),
+        BotCommand("pool", "price + Merkl campaign status"),
+        BotCommand("positions", "open positions + range status"),
+        BotCommand("status", "per-position risk (border + IL)"),
+        BotCommand("suggest", "suggest a range for a target time-in-range"),
+        BotCommand("reward", "est. daily KAT for a range"),
+        BotCommand("open", "log a position (guided)"),
+        BotCommand("close", "close a position"),
+        BotCommand("cancel", "abort an /open"),
+        BotCommand("ping", "health check"),
+    ])
     # Alerts run via GitHub Actions cron (python -m app.monitor). Start an
     # in-process loop only when explicitly asked (e.g. an always-on single host).
     if os.environ.get("INPROCESS_MONITOR") == "1":
@@ -496,6 +534,8 @@ def build_application() -> Application:
     text_me = filters.TEXT & ~filters.COMMAND & only_me
 
     app.add_handler(CommandHandler("ping", ping, filters=only_me))
+    app.add_handler(CommandHandler("help", help_cmd, filters=only_me))
+    app.add_handler(CommandHandler("start", help_cmd, filters=only_me))
     app.add_handler(CommandHandler("price", price, filters=only_me))
     app.add_handler(CommandHandler("pool", pool, filters=only_me))
     app.add_handler(CommandHandler("positions", positions_cmd, filters=only_me))

@@ -65,6 +65,7 @@ python -m app.bot               # start the Telegram bot (needs token + user id)
 ## Commands (in Telegram, locked to you)
 
 - `/ping` — health check
+- `/help` — list all commands (also `/start`)
 - `/price` — current ETH price from pool `slot0`
 - `/pool` — price + Merkl campaign status (incentive APR, daily KAT, end date; ⚠️ flagged if it ends within 7 days)
 - `/positions` — open positions with in/out-of-range status
