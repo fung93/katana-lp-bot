@@ -1,0 +1,8 @@
+# Android / Termux deps. There's no binary libpq wheel for Android, so use plain
+# psycopg built against the system libpq (install it with: pkg install postgresql).
+# Everything else is pure Python. (python-telegram-bot is only needed for commands;
+# the bot runs command-only on the phone while GitHub Actions handles alerts.)
+python-telegram-bot>=21,<22
+httpx>=0.27
+python-dotenv>=1.0
+psycopg>=3.1,<4
