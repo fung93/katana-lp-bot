@@ -44,7 +44,7 @@ from telegram.ext import (
     filters,
 )
 
-from .chain import get_slot0
+from .chain import get_liquidity, get_slot0
 from .cmdargs import opt_amount, parse_kwargs, to_amount
 from .config import (
     get_allowed_user_id,
@@ -53,9 +53,11 @@ from .config import (
     get_telegram_token,
     get_wallet_address,
 )
+from .liquidity import liquidity_share
 from .merkl import fetch_campaign, fetch_pool_kat, fetch_pool_tvl
 from .monitor import monitor_loop
 from .positions import (
+    bounds_to_ticks,
     close_position,
     exit_report,
     find_open_by_prefix,
@@ -417,11 +419,11 @@ async def suggest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
     try:
         camp = await asyncio.to_thread(fetch_campaign)
-        tvl = await asyncio.to_thread(fetch_pool_tvl)
+        l_pool = await asyncio.to_thread(get_liquidity, get_rpc_url(), get_pool_address())
+        lt, ut = bounds_to_ticks(sug.lower_price, sug.upper_price)
 
         def daily_kat(cap: float) -> float:
-            share = cap / (tvl + cap) if tvl > 0 else 0.0
-            return share * camp.daily_reward * sug.time_in_range
+            return liquidity_share(cap, price, lt, ut, l_pool) * camp.daily_reward * sug.time_in_range
 
         k1 = daily_kat(1000.0)
         apr = (k1 * camp.reward_price_usd) / 1000.0 * 365
@@ -431,7 +433,7 @@ async def suggest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             kc = daily_kat(capital)
             lines.append(f"for ${capital:,.0f}: {kc:,.0f} KAT/day "
                          f"(≈ ${kc * camp.reward_price_usd:,.2f})")
-        lines.append("  rough: capital/TVL share × pool KAT × time-in-range")
+        lines.append("  liquidity share × pool KAT × time-in-range (concentration-aware)")
     except Exception as exc:
         lines.append(f"(KAT estimate unavailable: {exc})")
     await update.message.reply_text("\n".join(lines))
@@ -455,12 +457,13 @@ async def reward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sigma_h, _ = await asyncio.to_thread(eth_hourly_vol)
         _tick, price = await _read_price()
         camp = await asyncio.to_thread(fetch_campaign)
-        tvl = await asyncio.to_thread(fetch_pool_tvl)
+        l_pool = await asyncio.to_thread(get_liquidity, get_rpc_url(), get_pool_address())
     except Exception as exc:
         await update.message.reply_text(f"⚠️ data fetch failed: {exc}")
         return
     tir = await asyncio.to_thread(time_in_range_for_bounds, price, lower, upper, sigma_h, days)
-    share = 1000.0 / (tvl + 1000.0) if tvl > 0 else 0.0
+    lt, ut = bounds_to_ticks(lower, upper)
+    share = liquidity_share(1000.0, price, lt, ut, l_pool)
     k1 = share * camp.daily_reward * tir
     apr = (k1 * camp.reward_price_usd) / 1000.0 * 365
     where = "in range" if lower <= price <= upper else "OUT of range"
@@ -469,7 +472,7 @@ async def reward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"ETH ${price:,.2f} ({where}) · vol {sigma_h * math.sqrt(24):.1%}/day · {days:g}d\n"
         f"est. time-in-range: {tir:.0%}\n"
         f"est. KAT: {k1:,.0f}/day (≈ ${k1 * camp.reward_price_usd:,.2f}) · ~{apr:.0%} APR\n"
-        "  rough: capital/TVL share × pool KAT × time-in-range (concentration not modeled)"
+        "  liquidity share × pool KAT × time-in-range (concentration-aware)"
     )
 
 

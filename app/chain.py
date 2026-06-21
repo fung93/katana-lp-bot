@@ -52,3 +52,13 @@ def get_slot0(rpc_url: str, pool_address: str) -> Slot0:
     sqrt_price_x96 = int.from_bytes(raw[0:_WORD], "big")
     tick = int.from_bytes(raw[_WORD:2 * _WORD], "big", signed=True)
     return Slot0(sqrt_price_x96=sqrt_price_x96, tick=tick)
+
+
+# keccak256("liquidity()")[:4]
+_LIQUIDITY_SELECTOR = "0x1a686502"
+
+
+def get_liquidity(rpc_url: str, pool_address: str) -> int:
+    """Pool's current in-range liquidity (uint128) via liquidity()."""
+    raw = _eth_call(rpc_url, pool_address, _LIQUIDITY_SELECTOR)
+    return int.from_bytes(raw[0:_WORD], "big")

@@ -38,3 +38,14 @@ def test_value_drops_when_price_drops() -> None:
     L = liquidity_for_capital(5000, 1700, LOW, UP)
     usdc, eth = composition(1600, LOW, UP, L)
     assert usdc + eth * 1600 < 5000  # impermanent loss + price drift
+
+
+def test_liquidity_share_rewards_concentration() -> None:
+    from app.liquidity import liquidity_share
+    from app.positions import bounds_to_ticks
+    l_pool = 6.8e16
+    wlt, wut = bounds_to_ticks(1500, 1900)
+    tlt, tut = bounds_to_ticks(1690, 1750)
+    wide = liquidity_share(1000, 1720, wlt, wut, l_pool)
+    tight = liquidity_share(1000, 1720, tlt, tut, l_pool)
+    assert tight > wide > 0      # same $, tighter range -> larger liquidity share

@@ -60,3 +60,15 @@ def liquidity_for_capital(capital_usd: float, entry_price: float,
     if value_per_l <= 0:
         raise ValueError("degenerate range or price")
     return capital_usd / value_per_l
+
+
+def liquidity_share(capital_usd: float, price: float, lower_tick: int,
+                    upper_tick: int, pool_liquidity: float) -> float:
+    """Your share of in-range liquidity vs the pool's current L (concentration-aware).
+
+    Merkl pays proportional to active liquidity, so the same capital in a tighter
+    range (more L per dollar) earns a larger share than a capital/TVL ratio implies.
+    """
+    l_you = liquidity_for_capital(capital_usd, price, lower_tick, upper_tick)
+    denom = pool_liquidity + l_you
+    return l_you / denom if denom > 0 else 0.0
