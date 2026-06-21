@@ -1,20 +1,23 @@
 name: monitor
 
-# Outbound-only alert check, every 5 minutes. Free on a PUBLIC repo (private
-# repos cap Actions minutes). Secrets live in repo settings, never in the code.
+# Near-continuous monitoring on free GitHub Actions (public repo).
+# GitHub fires plain */5 schedules only ~hourly, so instead we run ONE long job
+# that loops internally every 60s for ~5.5h. The */30 schedule + concurrency keep
+# a fresh run queued behind the active one, so it starts the moment the old loop
+# ends -> effectively continuous, with no PC and no PAT.
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch: {}        # allow a manual run from the Actions tab
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
 
 concurrency:
   group: monitor
-  cancel-in-progress: false
+  cancel-in-progress: false   # don't kill the running loop; queue the next one
 
 jobs:
-  check:
+  loop:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 340        # ~5h40m, under the 6h job limit
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,7 +25,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python -m app.monitor
+      - run: python -m app.monitor --loop 19800    # ~5h30m of 60s checks
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}

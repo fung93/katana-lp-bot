@@ -1,14 +1,19 @@
 """Phase 3 monitoring: sustained out/in-range + campaign-expiry alerts.
 
-Two ways to run the same check:
-  * ``python -m app.monitor`` - one-shot pass for a scheduler (GitHub Actions
-    cron). Alert state lives in Neon (monitor_state) because a scheduled run has
-    no memory between invocations.
-  * in-process loop (opt-in) - if the bot runs always-on, set INPROCESS_MONITOR=1
-    and bot.py drives monitor_loop() every MONITOR_INTERVAL_SEC.
+Run modes (all share run_check + the Neon-backed state):
+  * ``python -m app.monitor``            one-shot pass (for a plain scheduler).
+  * ``python -m app.monitor --loop N``   loop run_check for ~N seconds, then exit
+    (GitHub Actions job: a long run kept alive by schedule + concurrency, so the
+    check effectively runs every 60s without depending on your PC).
+  * in-process loop (opt-in)             bot.py drives monitor_loop() if
+    INPROCESS_MONITOR=1 (an always-on single host).
 
-Both call run_check(); both send via the Telegram HTTP API (no PTB needed for
-outbound), so the cron path stays a tiny, dependency-light script.
+State lives in Neon (monitor_state) so it survives across separate runs. Alerts
+go out via the Telegram HTTP API (no PTB needed).
+
+Neon idle-backoff: when you hold NO open positions, checks drop to every
+IDLE_INTERVAL_SEC so the database can sleep; with positions open, every
+MONITOR_INTERVAL_SEC.
 
 Alert rule (sustained, so a flickering price doesn't spam you):
   * out of range for >= sustain   -> "out of range" alert (IL attached)
@@ -19,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -39,6 +45,7 @@ from .tickmath import tick_to_price
 log = logging.getLogger("katana-lp-bot.monitor")
 
 MONITOR_INTERVAL_SEC = int(os.environ.get("MONITOR_INTERVAL_SEC", "60"))
+IDLE_INTERVAL_SEC = int(os.environ.get("IDLE_INTERVAL_SEC", "600"))  # no positions -> back off
 RANGE_SUSTAIN_SEC = int(os.environ.get("RANGE_SUSTAIN_SEC", "300"))  # 5 minutes
 EXPIRY_THRESHOLD_DAYS = 7
 
@@ -137,13 +144,13 @@ def _meta_set(key: str, value: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# One monitoring pass (shared by the cron and the in-process loop)
+# One monitoring pass (shared by every run mode)
 # --------------------------------------------------------------------------- #
-def run_check(send=send_telegram) -> int:
-    """Do one pass; send any alerts; return how many were sent."""
+def run_check(send=send_telegram) -> tuple[int, int]:
+    """Do one pass; send any alerts; return (alerts_sent, open_positions)."""
     positions = list_open()
     if not positions:
-        return 0
+        return 0, 0
     slot0 = get_slot0(get_rpc_url(), get_pool_address())
     price = tick_to_price(slot0.tick)
     now = time.time()
@@ -160,7 +167,7 @@ def run_check(send=send_telegram) -> int:
             send(_in_alert(p, price)); sent += 1
             log.info("IN alert for %s", p.id[:8])
     sent += _maybe_expiry(send)
-    return sent
+    return sent, len(positions)
 
 
 def _maybe_expiry(send) -> int:
@@ -181,21 +188,46 @@ def _maybe_expiry(send) -> int:
     return 0
 
 
+def _sleep_for(n_open: int) -> int:
+    return MONITOR_INTERVAL_SEC if n_open else IDLE_INTERVAL_SEC
+
+
 # --------------------------------------------------------------------------- #
-# In-process loop (opt-in: bot.py starts this only when INPROCESS_MONITOR=1)
+# Bounded loop (GitHub Actions job) and in-process loop (opt-in)
 # --------------------------------------------------------------------------- #
+def run_loop(max_seconds: float, send=send_telegram) -> None:
+    """Loop run_check for ~max_seconds, then return so the job can hand off."""
+    deadline = time.time() + max_seconds
+    log.info("loop for %.0fs (active %ss / idle %ss)",
+             max_seconds, MONITOR_INTERVAL_SEC, IDLE_INTERVAL_SEC)
+    while time.time() < deadline:
+        try:
+            _, n_open = run_check(send)
+        except Exception as exc:
+            log.warning("loop tick failed: %s", exc)
+            n_open = 0
+        nap = _sleep_for(n_open)
+        if time.time() + nap >= deadline:
+            break
+        time.sleep(nap)
+
+
 async def monitor_loop() -> None:
-    log.info("in-process monitor loop started (interval %ss, sustain %ss)",
-             MONITOR_INTERVAL_SEC, RANGE_SUSTAIN_SEC)
+    log.info("in-process monitor loop started (active %ss / idle %ss)",
+             MONITOR_INTERVAL_SEC, IDLE_INTERVAL_SEC)
     while True:
         try:
-            await asyncio.to_thread(run_check)
-        except Exception as exc:  # a bad tick must never kill the loop
+            _, n_open = await asyncio.to_thread(run_check)
+        except Exception as exc:
             log.warning("monitor tick failed: %s", exc)
-        await asyncio.sleep(MONITOR_INTERVAL_SEC)
+            n_open = 0
+        await asyncio.sleep(_sleep_for(n_open))
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    count = run_check()
-    print(f"monitor: {count} alert(s) sent")
+    if len(sys.argv) >= 3 and sys.argv[1] == "--loop":
+        run_loop(float(sys.argv[2]))
+    else:
+        sent, _ = run_check()
+        print(f"monitor: {sent} alert(s) sent")
