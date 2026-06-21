@@ -72,6 +72,7 @@ python -m app.bot               # start the Telegram bot (needs token + user id)
 - `/status` — on-demand per-position risk: in/out, distance to nearest border, IL
 - `/suggest` — vol-based range: `/suggest [days] [target%] [capital]` → range + est. time-in-range + est. daily KAT
 - `/reward` — est. daily KAT for $1,000 in a range you pick: `/reward <lower> <upper> [days]`
+- `/backtest` — replay the suggested range over real ETH history: `/backtest [days] [target%]`
 - `/open` — guided prompts (entry → lower → upper → eth → usdc); value is computed as eth×entry + usdc; USD in, ticks stored
 - `/close` — auto exit price + V3 exit composition + entry→exit value change + per-position KAT
 - `/cancel` — abort an `/open` in progress

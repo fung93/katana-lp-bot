@@ -16,6 +16,7 @@ Commands:
     /status      on-demand per-position risk: in/out, border distance, IL
     /suggest     vol-based range suggestion: /suggest [days] [target%] [capital]
     /reward      est. daily KAT for $1,000 in a range: /reward <lower> <upper> [days]
+    /backtest    replay /suggest range over real ETH history: /backtest [days] [target%]
     /open        guided: prompts entry -> lower -> upper -> eth -> usdc
     /close       auto exit price + V3 exit composition + value change;
                  /close <id> to pick when several are open
@@ -45,6 +46,7 @@ from telegram.ext import (
     filters,
 )
 
+from .backtest import backtest_width
 from .chain import get_liquidity, get_slot0
 from .cmdargs import opt_amount, parse_kwargs, to_amount
 from .config import (
@@ -66,7 +68,7 @@ from .positions import (
     list_open,
     open_position,
 )
-from .prices import eth_hourly_vol
+from .prices import eth_hourly_vol, fetch_eth_closes, hourly_vol
 from .rawlog import record
 from .suggest import suggest_range, time_in_range_for_bounds
 from .tickmath import tick_to_price
@@ -477,6 +479,43 @@ async def reward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@restricted
+async def backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args
+    try:
+        days = float(args[0]) if len(args) >= 1 else 7.0
+        target = float(args[1]) / 100 if len(args) >= 2 else 0.80
+    except ValueError:
+        await update.message.reply_text("Usage: /backtest [days] [target%]\ne.g. /backtest 7 80")
+        return
+    if not 0.01 <= target <= 0.99 or days <= 0:
+        await update.message.reply_text("Need days > 0 and target% between 1 and 99.")
+        return
+    try:
+        closes = await asyncio.to_thread(fetch_eth_closes)
+        _tick, price = await _read_price()
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ data fetch failed: {exc}")
+        return
+    sigma_h = hourly_vol(closes)
+    sug = await asyncio.to_thread(suggest_range, price, sigma_h, days, target)
+    half_width = math.log(sug.upper_price / price)
+    horizon = max(1, int(round(days * 24)))
+    realized, n = await asyncio.to_thread(backtest_width, closes, half_width, horizon)
+    if n == 0:
+        await update.message.reply_text("Not enough price history to backtest that horizon.")
+        return
+    verdict = ("✅ model ≈ reality" if abs(realized - target) <= 0.08
+               else "⚠️ model off — recent market diverged from the random-walk assumption")
+    await update.message.reply_text(
+        f"\U0001f9ea Backtest — ±{sug.half_width_pct:.1f}% band, {days:g}d hold\n"
+        f"over last {len(closes) / 24:.0f}d of ETH ({n} rolling windows)\n"
+        f"model time-in-range: {target:.0%}\n"
+        f"realized (historical): {realized:.0%}\n"
+        f"{verdict}"
+    )
+
+
 _HELP = (
     "\U0001f916 Katana LP bot — commands\n\n"
     "Read\n"
@@ -486,7 +525,8 @@ _HELP = (
     "/status — per-position risk: distance to border + IL\n\n"
     "Plan\n"
     "/suggest [days] [target%] [capital] — suggest a range + est. KAT\n"
-    "/reward <lower> <upper> [days] — est. daily KAT per $1,000 for a range\n\n"
+    "/reward <lower> <upper> [days] — est. daily KAT per $1,000 for a range\n"
+    "/backtest [days] [target%] — replay the suggested range over real ETH history\n\n"
     "Manage\n"
     "/open — log a position (guided: entry → lower → upper → eth → usdc)\n"
     "/close — close it: exit price + composition + value change + KAT\n"
@@ -510,6 +550,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("status", "per-position risk (border + IL)"),
         BotCommand("suggest", "suggest a range for a target time-in-range"),
         BotCommand("reward", "est. daily KAT for a range"),
+        BotCommand("backtest", "replay a suggested range over real history"),
         BotCommand("open", "log a position (guided)"),
         BotCommand("close", "close a position"),
         BotCommand("cancel", "abort an /open"),
@@ -542,6 +583,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("status", status, filters=only_me))
     app.add_handler(CommandHandler("suggest", suggest, filters=only_me))
     app.add_handler(CommandHandler("reward", reward, filters=only_me))
+    app.add_handler(CommandHandler("backtest", backtest, filters=only_me))
     app.add_handler(CommandHandler("close", close_cmd, filters=only_me))
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("open", open_start, filters=only_me)],
