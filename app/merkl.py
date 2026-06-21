@@ -120,3 +120,16 @@ def fetch_pool_kat(wallet: str, pool_address: str, chain_id: int = 747474,
                     total_raw += int(b.get("amount", 0))
     return total_raw / 1e18
 
+
+def fetch_pool_tvl(campaign_id: str = CAMPAIGN_ID, base: str = MERKL_API_BASE,
+                   timeout: float = 15.0) -> float:
+    """Pool TVL in USD, from the Merkl opportunities endpoint for the campaign."""
+    resp = httpx.get(f"{base}/v4/opportunities", params={"campaignId": campaign_id},
+                     timeout=timeout, follow_redirects=True)
+    resp.raise_for_status()
+    payload = resp.json()
+    if not payload:
+        raise RuntimeError("Merkl returned no opportunity for TVL")
+    opp = payload[0] if isinstance(payload, list) else payload
+    return float(opp.get("tvl") or 0.0)
+

@@ -13,6 +13,7 @@ Commands:
     /pool        price + Merkl campaign status (APR, daily KAT, end date)
     /positions   list open positions with in/out-of-range status
     /status      on-demand per-position risk: in/out, border distance, IL
+    /suggest     vol-based range suggestion: /suggest [days] [target%] [capital]
     /open        guided: prompts entry -> lower -> upper -> eth -> usdc
     /close       auto exit price + V3 exit composition + value change;
                  /close <id> to pick when several are open
@@ -28,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import math
 import os
 from datetime import datetime, timezone
 
@@ -50,7 +52,7 @@ from .config import (
     get_telegram_token,
     get_wallet_address,
 )
-from .merkl import fetch_campaign, fetch_pool_kat
+from .merkl import fetch_campaign, fetch_pool_kat, fetch_pool_tvl
 from .monitor import monitor_loop
 from .positions import (
     close_position,
@@ -60,7 +62,9 @@ from .positions import (
     list_open,
     open_position,
 )
+from .prices import eth_hourly_vol
 from .rawlog import record
+from .suggest import suggest_range
 from .tickmath import tick_to_price
 
 logging.basicConfig(
@@ -383,6 +387,48 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(out))
 
 
+@restricted
+async def suggest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args
+    try:
+        days = float(args[0]) if len(args) >= 1 else 7.0
+        target = float(args[1]) / 100 if len(args) >= 2 else 0.80
+        capital = float(args[2]) if len(args) >= 3 else None
+    except ValueError:
+        await update.message.reply_text(
+            "Usage: /suggest [days] [target%] [capital]\ne.g. /suggest 7 80 5000")
+        return
+    if not 0.01 <= target <= 0.99 or days <= 0:
+        await update.message.reply_text("Need days > 0 and target% between 1 and 99.")
+        return
+    try:
+        sigma_h, _ = await asyncio.to_thread(eth_hourly_vol)
+        _tick, price = await _read_price()
+    except Exception as exc:
+        await update.message.reply_text(f"⚠️ data fetch failed: {exc}")
+        return
+    sug = await asyncio.to_thread(suggest_range, price, sigma_h, days, target)
+    lines = [
+        f"\U0001f3af Suggested range — {days:g}d horizon, target {target:.0%} in-range",
+        f"ETH ${price:,.2f}  ·  vol {sigma_h * math.sqrt(24):.1%}/day",
+        f"range: ${sug.lower_price:,.0f} – ${sug.upper_price:,.0f}  (±{sug.half_width_pct:.1f}%)",
+        f"est. time-in-range: {sug.time_in_range:.0%}",
+    ]
+    if capital:
+        try:
+            camp = await asyncio.to_thread(fetch_campaign)
+            tvl = await asyncio.to_thread(fetch_pool_tvl)
+            share = capital / (tvl + capital) if tvl > 0 else 0.0
+            exp_kat = share * camp.daily_reward * sug.time_in_range
+            lines.append(
+                f"est. daily KAT for ${capital:,.0f}: {exp_kat:,.0f} KAT "
+                f"(≈ ${exp_kat * camp.reward_price_usd:,.2f}/day)")
+            lines.append("  rough: capital/TVL share × pool KAT × time-in-range")
+        except Exception as exc:
+            lines.append(f"(KAT estimate unavailable: {exc})")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def _post_init(application: Application) -> None:
     # Alerts run via GitHub Actions cron (python -m app.monitor). Start an
     # in-process loop only when explicitly asked (e.g. an always-on single host).
@@ -407,6 +453,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("pool", pool, filters=only_me))
     app.add_handler(CommandHandler("positions", positions_cmd, filters=only_me))
     app.add_handler(CommandHandler("status", status, filters=only_me))
+    app.add_handler(CommandHandler("suggest", suggest, filters=only_me))
     app.add_handler(CommandHandler("close", close_cmd, filters=only_me))
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("open", open_start, filters=only_me)],

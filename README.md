@@ -7,7 +7,7 @@ Signal-only LP position tracker for the Katana **vbUSDC/vbETH 0.05%** pool
 never executes trades, never moves funds, and never handles private keys.
 
 See [`lp_bot_build_plan.md`](lp_bot_build_plan.md) for the full roadmap and
-[`DECISIONS.md`](DECISIONS.md) for stack/hosting decisions. **This repo implements Phases 0–3 (scaffold, monitoring, position logging, border/IL alerts).**
+[`DECISIONS.md`](DECISIONS.md) for stack/hosting decisions. **This repo implements Phases 0–4 (scaffold, monitoring, position logging, border/IL alerts, range suggester).**
 
 ## Layout
 
@@ -23,6 +23,8 @@ app/
   db.py           psycopg v3 + Neon cold-start retry
   positions.py    open/close/list positions + exit report + IL (USD in, ticks stored)
   monitor.py      background loop: sustained out/in-range + campaign-expiry alerts
+  prices.py       ETH price history + realized vol (Kraken/Coingecko) for /suggest
+  suggest.py      vol-based range suggester (Monte-Carlo time-in-range)
   migrate.py      forward-only SQL migration runner  ->  python -m app.migrate
   bot.py          Telegram bot (/ping /price /pool /positions /status /open /close)  ->  python -m app.bot
   check_slot0.py  one-shot live ETH price print  ->  python -m app.check_slot0
@@ -36,6 +38,7 @@ tests/
   test_positions.py  USD<->tick bounds + arg parsing + IL
   test_liquidity.py  V3 composition (round-trip + edges)
   test_monitor.py    sustained in/out-of-range alert state machine
+  test_suggest.py    realized vol + Monte-Carlo range suggester
 ```
 
 ## Setup
@@ -66,6 +69,7 @@ python -m app.bot               # start the Telegram bot (needs token + user id)
 - `/pool` — price + Merkl campaign status (incentive APR, daily KAT, end date; ⚠️ flagged if it ends within 7 days)
 - `/positions` — open positions with in/out-of-range status
 - `/status` — on-demand per-position risk: in/out, distance to nearest border, IL
+- `/suggest` — vol-based range: `/suggest [days] [target%] [capital]` → range + est. time-in-range + est. daily KAT
 - `/open` — guided prompts (entry → lower → upper → eth → usdc); value is computed as eth×entry + usdc; USD in, ticks stored
 - `/close` — auto exit price + V3 exit composition + entry→exit value change + per-position KAT
 - `/cancel` — abort an `/open` in progress
@@ -122,4 +126,10 @@ Not in scope until later: monitoring loop + alerts (Phase 3).
 - [x] `/status` on-demand risk readout; once-daily campaign-expiry warning
 - [x] proven end-to-end: a real out-of-range alert reached Telegram in the live test
 
-Not in scope until later: range suggester (Phase 4), analytics (Phase 5), hedge (Phase 6).
+## Phase 4 exit criteria
+
+- [x] `/suggest` — realized vol (Kraken/Coingecko) → Monte-Carlo width for a target time-in-range
+- [x] honest expected daily KAT = capital/TVL share × pool KAT × time-in-range (not headline APR)
+- [x] wider range for a longer horizon / higher target; logic tested offline (seeded MC)
+
+Not in scope until later: analytics (Phase 5), delta-neutral hedge (Phase 6).
